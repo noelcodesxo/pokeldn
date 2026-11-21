@@ -20,10 +20,14 @@ def library() -> Path:
 
 
 def entries() -> list[Entry]:
-    if not MACROS.is_dir():
+    return _entries(MACROS)
+
+
+def _entries(directory: Path) -> list[Entry]:
+    if not directory.is_dir():
         return []
     found = []
-    for path in sorted(MACROS.glob(f"*{EXTENSION}")):
+    for path in sorted(directory.glob(f"*{EXTENSION}")):
         try:
             found.append(Entry(path, loads(path.read_text(encoding="utf-8")).name))
         except (OSError, UnicodeDecodeError, MacroError) as e:
@@ -31,17 +35,18 @@ def entries() -> list[Entry]:
     return sorted(found, key=lambda e: e.name.casefold())
 
 
-def _free_path(name: str) -> Path:
+def _free_path(name: str, directory: Path | None = None) -> Path:
+    directory = directory if directory is not None else MACROS
     stem = re.sub(r"[^\w\- ]+", "", name).strip()[:60] or "macro"
-    path, n = MACROS / f"{stem}{EXTENSION}", 2
+    path, n = directory / f"{stem}{EXTENSION}", 2
     while path.exists():
-        path, n = MACROS / f"{stem} {n}{EXTENSION}", n + 1
+        path, n = directory / f"{stem} {n}{EXTENSION}", n + 1
     return path
 
 
 def save(macro: Macro, path: Path | None = None) -> Path:
-    MACROS.mkdir(parents=True, exist_ok=True)
     path = path or _free_path(macro.name)
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(macro.dumps(), encoding="utf-8")
     tmp.replace(path)

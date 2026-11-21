@@ -450,6 +450,8 @@ answers or Stop looking.
 | on-screen controller | holds buttons; sticks in eight directions, L3/R3 at centre |
 | Keyboard | arrows D-pad, X A, Z B, S X, A Y, Q L, W R, 1 ZL, 2 ZR, Enter +, Backspace -, H HOME, C Capture |
 | Record into the macro | each press becomes a step with hold time and pause |
+| Record loop | capture a reusable sequence without adding steps to the open macro |
+| Insert saved loop | choose a saved sequence, repeat count, destination and position |
 | macro editor | buttons, sticks, waits, nested repeats; Run once and Loop parts |
 | Play on the board | the board plays the macro on its own clock |
 
@@ -458,6 +460,25 @@ Macros are `.pokemacro` files in `Documents/pokeldn/Macros`
 `127.0.0.1:47800`. On macOS 26 a process signed as a bundle's main executable gets no Bluetooth
 discoveries, so the packaged app runs the service from `Contents/Helpers/pokeldn-bluetooth`, a
 bare-signed copy with `_internal` linked to `../Frameworks`.
+
+To reuse a fighting sequence, open a macro and press **Record loop** in the macro panel.
+This marks its beginning. Use the controller normally, then press **Finish loop** to mark its end.
+Give it a name and a repeat count (1–10000), then **Save loop**. If saving fails, the captured
+steps stay available for retry. **Pause** and **Resume** let you leave out planning time; leaving
+the Control page pauses capture too. Resume explicitly when you return. **Cancel loop** discards
+the capture. Finish or cancel before changing macros, editing steps or playing a macro.
+
+After saving, choose where to insert the loop: **Run once**, **Loop**, or any nested repeat body.
+Nested destinations show their full step path. Choose **Beginning** or **After step N**, adjust
+the repeat count if needed, and press **Insert loop**. Canceling this dialog keeps the saved loop
+for later. **Insert saved loop** opens the same chooser in another macro. Existing repeats also
+have **Save as loop** to add their bodies to the library.
+
+Saved loops live in `Macros/Loops`. Insertion embeds an independent repeat with explicit timing,
+so a destination macro's default timings do not change the recorded sequence. You can edit, move
+or remove the inserted repeat normally. Changing or deleting the library file does not change
+inserted copies, and shared macros play without access to the loop library. An insertion that
+exceeds the board's step or nesting limits is refused without changing the open macro.
 
 ## The board's screen
 
