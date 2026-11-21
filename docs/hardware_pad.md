@@ -175,6 +175,16 @@ The compiler expands repeats, joins neighbouring entries that hold the same repo
 over 65535 ms. A macro that expands past 8192 entries is refused. `after: 0` between two equal presses
 holds them as one. A file whose `version` is newer than the reader's is refused.
 
+The editor's reusable loops (`pokeldn.app.macro_loops`) use the same version 1 format in
+`Macros/Loops`: `setup` is empty, `loop` holds the saved body, and `loops` holds its default
+repeat count (1–10000). **Record loop** captures a separate buffer; **Finish loop** names and
+saves it, then opens a destination/position chooser. **Save as loop** saves an existing repeat's
+body. Saved steps materialize inherited `ms` and `after` recursively, including stick steps.
+Insertion copies the body into a normal `{repeat, steps, note}` block, with the saved name as
+its note. The entire candidate macro is validated and compiled before it is saved. The extra
+repeat level and expanded entries must fit the existing depth and board limits. There are no
+file references in inserted macros, and no firmware or file-version change is required.
+
 ## The host side
 
 `pokeldn.pad.service` holds the Bluetooth link and takes one JSON request per line on

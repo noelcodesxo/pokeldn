@@ -14,7 +14,7 @@ from gui import theme as t
 from gui.views import widgets
 from gui.views.widgets import open_folder
 from gui.localization import error_message
-from pokeldn.app import macros
+from pokeldn.app import macro_loops, macros
 from pokeldn.app.paths import SESSION
 from pokeldn.app.runner import Process
 from pokeldn.pad import macro as m
@@ -96,6 +96,7 @@ class ControllerView:
         self.held: set[str] = set()
         self.keyboard = False
         self.recording = False
+        self.loop_capture: list | None = None  # kept separate until saved; None means no capture session
         self.last_up = 0.0
         self.pressed_at = 0.0
         self.items: list[macros.Entry] = []
@@ -108,11 +109,14 @@ class ControllerView:
         self.pad = ft.Column(spacing=18, horizontal_alignment=ft.CrossAxisAlignment.CENTER, tight=True)
         self.editor = ft.ListView(spacing=14, padding=ft.Padding(18, 8, 18, 18), expand=True)
         self.footer = ft.Column(spacing=8, tight=True)
+        self.library_buttons = [
+            t.icon_button("plus", lambda e: self.new(), tr('controller.new_macro_b9a983', 'New macro')),
+            t.icon_button("upload", self._import, tr('controller.import_a_pokemacro_file_13a934', 'Import a .pokemacro file')),
+        ]
         self.panes = t.Panes(
             (tr('controller.pane_macros', 'Macros'), "bulletlist", t.panel(ft.Column([
                 t.panel_header(tr('controller.macros_866dcd', 'Macros'),
-                               t.icon_button("plus", lambda e: self.new(), tr('controller.new_macro_b9a983', 'New macro')),
-                               t.icon_button("upload", self._import, tr('controller.import_a_pokemacro_file_13a934', 'Import a .pokemacro file')),
+                               *self.library_buttons,
                                t.icon_button("folder", lambda e: open_folder(str(macros.library())),
                                              tr('controller.open_the_macros_folder_10afa1', 'Open the macros folder'))),
                 t.fade(self.list),
@@ -138,6 +142,7 @@ class ControllerView:
     def leave(self) -> None:
         self.visible = False
         widgets.KEY_TARGET[0] = None
+        self.recording, self.last_up = False, 0.0
         self._release_all()
 
     # The link
@@ -281,19 +286,20 @@ class ControllerView:
         step = {"press": [key]} if key in m.KEYS else {"left" if key.startswith("LS_") else "right":
                                                            list(direction_of_key(key))}
         step["ms"] = max(1, round((released - self.pressed_at) * 1000))
-        steps = getattr(self.macro, self.target)
+        steps = self.loop_capture if self.loop_capture is not None else getattr(self.macro, self.target)
         if steps and self.last_up and "wait" not in steps[-1] and "repeat" not in steps[-1]:
             steps[-1]["after"] = max(0, round((self.pressed_at - self.last_up) * 1000))
         self.last_up = released
         steps.append(step)
-        self.save()
+        if self.loop_capture is None:
+            self.save()
         self.app.ui(self.render_editor)
 
     # The macro library
 
     def refresh_list(self) -> None:
         self.items = macros.entries()
-        if self.path and not os.path.exists(self.path):
+        if self.path and not os.path.exists(self.path) and self.loop_capture is None:
             self.path, self.macro = None, None
         rows = [self._row(entry) for entry in self.items]
         self.list.controls = rows or [ft.Container(t.text(
@@ -311,6 +317,8 @@ class ControllerView:
             on_click=lambda e, p=entry.path: self.open(p))
 
     def open(self, path) -> None:
+        if self._capture_guard():
+            return
         try:
             self.macro, self.path = macros.load(path), path
             self._say("")
@@ -318,14 +326,20 @@ class ControllerView:
             self._say(tr('controller.this_file_does_not_load_1d6a84', 'This file does not load: {value0}', value0=error_message(error)), t.RED)
             return
         self.recording = False
+        self.last_up = 0.0
+        self._release_all()
         self.refresh_list()
         self.render_all()
         self.control.update()
 
     def new(self) -> None:
+        if self._capture_guard():
+            return
         macro = m.Macro(name=tr('controller.new_macro_b9a983', 'New macro'), loops=1)
         self.path = macros.save(macro)
         self.macro = macro
+        self.recording, self.last_up = False, 0.0
+        self._release_all()
         self.refresh_list()
         self.render_all()
         self.control.update()
@@ -335,8 +349,12 @@ class ControllerView:
             self.path = macros.save(self.macro, self.path)
 
     async def _import(self, e) -> None:
+        if self._capture_guard():
+            return
         files = await self.app.picker.pick_files(allowed_extensions=[m.EXTENSION[1:]],
                                                  file_type=ft.FilePickerFileType.CUSTOM, allow_multiple=True)
+        if self._capture_guard():
+            return
         last = None
         for f in files or []:
             if f.path:
@@ -366,7 +384,11 @@ class ControllerView:
             self._say(error_message(error), t.RED)
 
     def _delete(self) -> None:
+        if self._capture_guard():
+            return
         def done(e):
+            if self._capture_guard():
+                return
             macros.remove(self.path)
             self.path, self.macro = None, None
             self.app.page.pop_dialog()
@@ -384,6 +406,8 @@ class ControllerView:
     # Playing
 
     def play(self, e=None) -> None:
+        if self._capture_guard():
+            return
         if self.macro is None:
             return
         try:
@@ -411,6 +435,9 @@ class ControllerView:
     # Rendering
 
     def render_all(self) -> None:
+        for button in self.library_buttons:
+            button.disabled = self.loop_capture is not None
+        self.list.disabled = self.loop_capture is not None
         self.render_status(update=False)
         self.render_pad()
         self.render_editor(update=False)
@@ -536,10 +563,12 @@ class ControllerView:
         options = ft.Row([
             ft.Row([t.switch(self.keyboard, self._keyboard), t.text(tr('controller.keyboard_231681', 'Keyboard'), 13, t.SOFT)], spacing=6, tight=True,
                    tooltip=tr('controller.arrows_for_the_d_pad_x_a_z_b_s_x_a_y_q_l_w_r_1_zl_2_zr__c8b3b3', 'Arrows for the D-pad, X A, Z B, S X, A Y, Q L, W R, 1 ZL, 2 ZR, Enter +, Backspace -, H HOME, C Capture')),
-            ft.Row([t.switch(self.recording, self._recording), t.text(tr('controller.record_into_the_macro_0c10a9', 'Record into the macro'), 13, t.SOFT)],
+            ft.Row([t.switch(self.recording, self._recording), t.text(
+                tr('controller.record_into_loop', 'Record into the loop') if self.loop_capture is not None else
+                tr('controller.record_into_the_macro_0c10a9', 'Record into the macro'), 13, t.SOFT)],
                    spacing=6, tight=True,
                    tooltip=tr('controller.each_press_its_length_and_the_pause_before_the_next_one_100b06', 'Each press, its length and the pause before the next one become steps')),
-        ], spacing=24)
+        ], spacing=24, wrap=True)
         self.pad.controls = [t.card(tr('controller.controller_31df66', 'Controller'), ft.Column([
             ft.Container(ft.Column([shoulders, middle, lower], spacing=22, tight=True,
                                    horizontal_alignment=ft.CrossAxisAlignment.CENTER),
@@ -554,12 +583,202 @@ class ControllerView:
         self.pad.update()
 
     def _recording(self, e) -> None:
-        if e.control.value and self.macro is None:
+        self._set_recording(e.control.value)
+
+    def _set_recording(self, enabled: bool) -> None:
+        if enabled and self.macro is None:
             self.new()
-        self.recording = e.control.value
+        self.recording = enabled
         self.last_up = 0.0
-        self.render_pad()
-        self.pad.update()
+        self._release_all()
+        self.render_all_update()
+
+    # Reusable loops
+
+    def _capture_guard(self) -> bool:
+        if self.loop_capture is None:
+            return False
+        self._say(tr('controller.finish_or_cancel_loop', 'Finish or cancel loop first.'), t.AMBER)
+        return True
+
+    def _pause_recording(self) -> None:
+        self.recording, self.last_up = False, 0.0
+        self._release_all()
+
+    def _start_loop(self, e=None) -> None:
+        if self._capture_guard() or self.macro is None:
+            return
+        if self.board.get("playing"):
+            self._say(tr('controller.stop_before_recording_loop', 'Stop playback before recording a loop.'), t.AMBER)
+            return
+        self._pause_recording()
+        self.loop_capture, self.recording = [], True
+        self._say("")
+        self.render_all_update()
+
+    def _cancel_loop(self, e=None) -> None:
+        self._pause_recording()
+        self.loop_capture = None
+        self.render_all_update()
+
+    def _finish_loop(self, e=None) -> None:
+        if self.loop_capture is None:
+            return
+        self._pause_recording()
+        self.render_all_update()
+        self._save_loop_dialog(self.loop_capture, 1, capture=True)
+
+    def _save_loop_dialog(self, steps: list, count: int, *, capture=False, name="") -> None:
+        if not capture and self._capture_guard():
+            return
+        self._pause_recording()
+        self.render_all_update()
+        source = self.macro
+        page = self.app.page
+        title = t.field(value=name)
+        repeats = t.field(value=str(count), digits=True, limit=5)
+        error = t.text("", 12, t.RED)
+
+        def done(e):
+            try:
+                if self.macro is not source or (not capture and self._capture_guard()):
+                    raise m.MacroError(tr('controller.macro_changed', 'The open macro changed. Open this dialog again.'))
+                path = macro_loops.save(source, steps, title.value or "", int(repeats.value or 0))
+            except (OSError, ValueError) as problem:
+                error.value = error_message(problem)
+                error.update()
+                return
+            if capture:
+                self.loop_capture = None
+            page.pop_dialog()
+            self.render_all_update()
+            self._say(tr('controller.loop_saved', 'Loop saved to the library.'))
+            if capture:
+                self._insert_loop_dialog(path)
+
+        page.show_dialog(t.dialog(
+            modal=True, scrollable=True,
+            title=t.text(tr('controller.save_loop', 'Save loop'), 18),
+            content=ft.Container(ft.Column([
+                t.text(tr('controller.loop_save_hint', 'Save these steps for reuse in any macro.'), 12, t.MUTED),
+                t.labeled_control(tr('controller.name_dcd1d5', 'Name'), title),
+                t.labeled_control(tr('controller.loop_repeats', 'Repeat count (1–10000)'), repeats), error,
+            ], spacing=10, tight=True), width=420),
+            actions=[t.button(tr('controller.cancel_19766e', 'Cancel'), lambda e: page.pop_dialog(), filled=False),
+                     t.button(tr('controller.save_loop', 'Save loop'), done)]))
+
+    def _insert_loop_dialog(self, selected=None) -> None:
+        if self._capture_guard() or self.macro is None:
+            return
+        self._pause_recording()
+        self.render_all_update()
+        page, original = self.app.page, self.macro
+        error = t.text("", 12, t.RED)
+        try:
+            entries = macro_loops.entries()
+        except OSError as problem:
+            self._say(error_message(problem), t.RED)
+            return
+        if not entries:
+            self._say(tr('controller.no_saved_loops', 'No saved loops yet. Record a loop, or use Save as loop on a repeat.'), t.AMBER)
+            return
+        chosen = next((entry for entry in entries if entry.path == selected), entries[0])
+        saved = None
+        repeats = t.field(value="1", digits=True, limit=5)
+
+        def choose(e=None):
+            nonlocal saved
+            saved = None
+            try:
+                saved = macro_loops.load(entries[int(loops.value)].path)
+                repeats.value = str(saved.loops)
+                error.value = ""
+            except (OSError, UnicodeDecodeError, m.MacroError) as problem:
+                error.value = error_message(problem)
+            if e is not None:
+                repeats.update()
+                error.update()
+
+        loops = t.dropdown([(str(i), entry.name) for i, entry in enumerate(entries)],
+                           str(entries.index(chosen)), choose)
+        targets = list(macro_loops.destinations(original))
+
+        def target_label(section, parents):
+            label = tr('controller.run_once_5f041f', 'Run once') if section == "setup" else tr('controller.loop_f2f6a0', 'Loop')
+            steps = getattr(original, section)
+            for index in parents:
+                step = steps[index]
+                label += " / " + tr('controller.repeat_step', 'Step {number} (repeat)', number=index + 1)
+                if step.get("note"):
+                    label += f" · {step['note']}"
+                steps = step["steps"]
+            return label
+
+        default = next(i for i, (section, parents, _) in enumerate(targets) if section == self.target and not parents)
+        position = t.dropdown([], None)
+
+        def destination_changed(e=None):
+            steps = targets[int(destination.value)][2]
+            position.options = [ft.DropdownOption(key=str(i), text=(tr('controller.beginning', 'Beginning') if i == 0 else
+                                tr('controller.after_step', 'After step {number}', number=i))) for i in range(len(steps) + 1)]
+            position.value = str(len(steps))
+            if e is not None:
+                position.update()
+
+        destination = t.dropdown([(str(i), target_label(s, p)) for i, (s, p, _) in enumerate(targets)],
+                                 str(default), destination_changed)
+        destination_changed()
+        choose()
+
+        def done(e):
+            try:
+                if self._capture_guard() or self.macro is not original:
+                    raise m.MacroError(tr('controller.macro_changed', 'The open macro changed. Open this dialog again.'))
+                if saved is None:
+                    raise m.MacroError(tr('controller.choose_valid_loop', 'Choose a loop that loads successfully.'))
+                section, parents, _ = targets[int(destination.value)]
+                candidate = macro_loops.insert(original, saved, section, parents, int(position.value), int(repeats.value or 0))
+                path = macros.save(candidate, self.path)
+            except (OSError, ValueError) as problem:
+                error.value = error_message(problem)
+                error.update()
+                return
+            self.macro, self.path = candidate, path
+            self.last_up = 0.0
+            page.pop_dialog()
+            self.render_all_update()
+
+        page.show_dialog(t.dialog(
+            modal=True, scrollable=True,
+            title=t.text(tr('controller.insert_saved_loop', 'Insert saved loop'), 18),
+            content=ft.Container(ft.Column([
+                t.labeled_control(tr('controller.saved_loop', 'Saved loop'), loops),
+                t.labeled_control(tr('controller.destination', 'Destination'), destination),
+                t.labeled_control(tr('controller.position', 'Position'), position),
+                t.labeled_control(tr('controller.loop_repeats', 'Repeat count (1–10000)'), repeats),
+                t.text(tr('controller.loop_copy_hint', 'Inserts an independent copy. Cancel keeps the loop in the library.'), 12, t.MUTED), error,
+            ], spacing=10, tight=True), width=420),
+            actions=[t.button(tr('controller.cancel_19766e', 'Cancel'), lambda e: page.pop_dialog(), filled=False),
+                     t.button(tr('controller.insert_loop', 'Insert loop'), done)]))
+
+    def _loop_controls(self) -> ft.Control:
+        if self.loop_capture is None:
+            return ft.Row([
+                t.button(tr('controller.record_loop', 'Record loop'), self._start_loop, "repeat", filled=False,
+                         disabled=bool(self.board.get("playing"))),
+                t.button(tr('controller.insert_saved_loop', 'Insert saved loop'), lambda e: self._insert_loop_dialog(), filled=False),
+            ], spacing=6, wrap=True)
+        state = tr('controller.recording_loop', 'Recording loop · {count} steps', count=len(self.loop_capture)) if self.recording else \
+            tr('controller.loop_paused', 'Loop paused · {count} steps', count=len(self.loop_capture))
+        return ft.Column([
+            t.text(state, 12, t.RED if self.recording else t.AMBER),
+            ft.Row([
+                t.button(tr('controller.pause_loop', 'Pause') if self.recording else tr('controller.resume_loop', 'Resume'),
+                         lambda e: self._set_recording(not self.recording), filled=False),
+                t.button(tr('controller.finish_loop', 'Finish loop'), self._finish_loop),
+                t.button(tr('controller.cancel_loop', 'Cancel loop'), self._cancel_loop, filled=False),
+            ], spacing=6, wrap=True),
+        ], spacing=6, tight=True)
 
     # The editor
 
@@ -582,6 +801,8 @@ class ControllerView:
                 self._section(tr('controller.run_once_5f041f', 'Run once'), "setup", mac.setup),
                 self._section(tr('controller.loop_f2f6a0', 'Loop'), "loop", mac.loop),
             ]
+            if self.loop_capture is not None:
+                self.editor.controls = [ft.Column(self.editor.controls, disabled=True, spacing=14)]
         self.render_footer()
         if update:
             try:
@@ -591,10 +812,12 @@ class ControllerView:
                 pass
 
     def render_footer(self) -> None:
-        self.footer.controls = [self._summary(), self._actions(), self.note] if self.macro else [self.note]
+        self.footer.controls = [self._summary(), self._loop_controls(), self._actions(), self.note] if self.macro else [self.note]
 
     def _text_field(self, label, value, setter, multiline=False, *, rename=False) -> ft.Control:
         def changed(e):
+            if self._capture_guard():
+                return
             setter(e.control.value)
             self.save()
             if rename:
@@ -605,6 +828,8 @@ class ControllerView:
 
     def _number(self, label, value, setter, tip: str = "") -> ft.Control:
         def changed(e):
+            if self._capture_guard():
+                return
             setter(int(e.control.value or 0))
             self.save()
             self.render_footer()
@@ -613,15 +838,18 @@ class ControllerView:
                                                 on_submit=changed, tooltip=tip or None), expand=True)
 
     def _section(self, title: str, target: str, steps: list) -> ft.Control:
-        rec = t.chip(tr('controller.recording_here_cce87d', 'Recording here'), "circle-info", t.RED) if self.recording and self.target == target else \
+        rec = t.chip(tr('controller.recording_here_cce87d', 'Recording here'), "circle-info", t.RED) if self.recording and self.loop_capture is None and self.target == target else \
             ft.Container(t.text(tr('controller.record_here_ea3c50', 'Record here'), 11, t.FAINT), on_click=lambda e: self._target(target),
-                         visible=self.recording)
+                         visible=self.recording and self.loop_capture is None)
         return t.section(title, ft.Column([
             *self._steps(steps, 0),
             self._adders(steps),
         ], spacing=4, tight=True), rec)
 
     def _target(self, target: str) -> None:
+        if self._capture_guard():
+            return
+        self._release_all()
         self.target, self.last_up = target, 0.0
         self.render_editor()
 
@@ -641,6 +869,9 @@ class ControllerView:
                 t.icon_button("trash", lambda e, s=steps, n=i: self._remove_step(s, n), tr('controller.remove_c3812f', 'Remove')),
             ], spacing=4), padding=ft.Padding(8 + 14 * depth, 2, 0, 2), border_radius=8, bgcolor=t.CARD))
             if "repeat" in step:
+                rows.append(ft.Container(t.link_button(tr('controller.save_as_loop', 'Save as loop'),
+                    lambda e, s=step: self._save_loop_dialog(s["steps"], s["repeat"], name=s.get("note", ""))),
+                    padding=ft.Padding(8 + 14 * depth, 0, 0, 0)))
                 inner = step.setdefault("steps", [])
                 rows += self._steps(inner, depth + 1)
                 rows.append(ft.Container(self._adders(inner), padding=ft.Padding(8 + 14 * (depth + 1), 0, 0, 0)))
@@ -648,6 +879,8 @@ class ControllerView:
 
     def _adders(self, steps: list) -> ft.Control:
         def add(kind):
+            if self._capture_guard():
+                return
             step = {"press": ["A"]} if kind == "press" else {"wait": 1000} if kind == "wait" else \
                 {"repeat": 2, "steps": [{"press": ["A"]}]}
             steps.append(step)
@@ -660,16 +893,22 @@ class ControllerView:
                        t.link_button(tr('controller.repeat_402130', '+ Repeat'), lambda e: add("repeat"))], spacing=0)
 
     def _move(self, steps, n, delta) -> None:
+        if self._capture_guard():
+            return
         steps[n + delta], steps[n] = steps[n], steps[n + delta]
         self.save()
         self.render_editor()
 
     def _remove_step(self, steps, n) -> None:
+        if self._capture_guard():
+            return
         del steps[n]
         self.save()
         self.render_editor()
 
     def _edit(self, steps: list, n: int) -> None:
+        if self._capture_guard():
+            return
         step = copy.deepcopy(steps[n])
         page = self.app.page
         controls: list[ft.Control] = []
@@ -740,6 +979,8 @@ class ControllerView:
         controls.append(t.labeled_control(tr('controller.note_optional_f9b73e', 'Note (optional)'), note))
 
         def done(e):
+            if self._capture_guard():
+                return
             new = collect()
             try:
                 m.check_steps([new])
@@ -770,11 +1011,12 @@ class ControllerView:
         connected = self.client is not None
         playing = bool(self.board.get("playing"))
         main = (t.button(tr('controller.stop_cae7d5', 'Stop'), self.stop, "stop", color=t.RED) if playing else
-                t.button(tr('controller.play_on_the_board_56ea82', 'Play on the board'), self.play, "play", disabled=not connected,
+                t.button(tr('controller.play_on_the_board_56ea82', 'Play on the board'), self.play, "play", disabled=not connected or self.loop_capture is not None,
                          tooltip=None if connected else tr('controller.connect_the_board_first_feea04', 'Connect the board first')))
         return ft.Row([main, ft.Row([
             t.icon_button("download", self._export, tr('controller.export_as_a_pokemacro_file_to_share_c4b552', 'Export as a .pokemacro file to share')),
-            t.icon_button("trash", lambda e: self._delete(), tr('controller.delete_this_macro_ef52c4', 'Delete this macro')),
+            t.icon_button("trash", lambda e: self._delete(), tr('controller.delete_this_macro_ef52c4', 'Delete this macro'),
+                          disabled=self.loop_capture is not None),
         ], spacing=2)], alignment=ft.MainAxisAlignment.SPACE_BETWEEN)
 
     def _say(self, text: str, color: str = t.MUTED) -> None:
